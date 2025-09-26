@@ -2,6 +2,10 @@
 
 Presence is Originoid's tool for getting the current Spotify status of users in our [Discord server](https://discord.gg/noid). It connects a Discord bot (with Presence Intent) to the Gateway and exposes it via REST and WebSocket.
 
+> [!NOTE]
+> Presence is only available for users who share a guild with the bot and have Spotify connected and visible in Discord.
+> WebSocket clients receive the latest snapshot, then it real-time updates.
+
 ## Endpoints
 
 - REST snapshot: `GET /v1/{DISCORD_USER_ID}`
@@ -30,10 +34,6 @@ DISCORD_BOT_TOKEN=YOUR_TOKEN_HERE
 cargo run
 ```
 
-> [!NOTE]
-> Presence is only available for users who share a guild with the bot and have Spotify connected and visible in Discord.
-> WebSocket clients receive the latest snapshot on connect (if cached), then real-time updates.
-
 ## Why this approach?
 
 This is heavily inspired by Lanyard. This avoids dealing with Spotify in general while still providing real-time listening data, within Discord’s limitations.
@@ -42,7 +42,7 @@ You're welcome to use this yourself! Ensure you enable the Presence Intent for y
 
 ---
 
-originoidco/presence is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+originoidco/presence is licensed under the [GNU Affero General Public License v3.0](LICENSE). Authored by [@dromzeh](https://x.com/@dromzeh/).
 
 You must state all significant changes made to the original software, make the source code available to the public with credit to the original author, original source, and use the same license.
 

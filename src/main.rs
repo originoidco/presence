@@ -121,7 +121,20 @@ async fn main() {
             ws.on_upgrade(move |socket| ws_handler(socket, user_id, state))
         });
 
-    let routes = get_route.or(ws_route).with(warp::cors().allow_any_origin());
+    // GET: /
+    let root = warp::path::end().and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({
+            "endpoints": [
+                {"method": "GET", "path": "/v1/{userid}"},
+                {"method": "WS",  "path": "/ws/v1/{userid}"}
+            ]
+        }))
+    });
+
+    let routes = root
+        .or(get_route)
+        .or(ws_route)
+        .with(warp::cors().allow_any_origin());
 
     info!("Starting HTTP server on 0.0.0.0:8787");
     tokio::spawn(discord::start_discord(
