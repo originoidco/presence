@@ -80,6 +80,7 @@ async fn ws_handler(ws: WebSocket, user_id: String, state: AppState) {
 
     let send_task = tokio::spawn(async move {
         while let Ok(changed_user_id) = rx.recv().await {
+            #[allow(clippy::collapsible_if)]
             if changed_user_id == user_id_for_task {
                 if let Some(presence) = cache.get(&changed_user_id) {
                     let payload = serde_json::to_string(&*presence).unwrap_or_else(|_| "{}".into());
