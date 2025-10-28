@@ -50,6 +50,50 @@ async fn get_presence_handler(user_id: String, state: AppState) -> Result<impl R
     }
 }
 
+async fn user_in_server_handler(
+    user_id: String,
+    _state: AppState,
+) -> Result<impl Reply, Rejection> {
+    let uid = match user_id.parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({ "error": "invalid user id" })),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    };
+
+    let guild_id = match std::env::var("GUILD_ID") {
+        Ok(s) => match s.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({ "error": "invalid GUILD_ID in env" })),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
+        },
+        Err(_) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({ "error": "GUILD_ID not set in env" })),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
+    };
+
+    match discord::is_member(guild_id, uid).await {
+        Ok(in_server) => Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({ "in_server": in_server })),
+            StatusCode::OK,
+        )),
+        Err(e) => Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({ "error": e })),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Infallible> + Clone {
     warp::any().map(move || state.clone())
 }
@@ -114,6 +158,12 @@ async fn main() {
         .and(with_state(state.clone()))
         .and_then(get_presence_handler);
 
+    // GET: /v1/{userid}/in_server
+    let in_server_route = warp::path!("v1" / String / "in_server")
+        .and(warp::get())
+        .and(with_state(state.clone()))
+        .and_then(user_in_server_handler);
+
     // WS: /ws/v1/{userid}
     let ws_route = warp::path!("ws" / "v1" / String)
         .and(warp::ws())
@@ -127,13 +177,15 @@ async fn main() {
         warp::reply::json(&serde_json::json!({
             "endpoints": [
                 {"method": "GET", "path": "/v1/{userid}"},
-                {"method": "WS",  "path": "/ws/v1/{userid}"}
+                {"method": "WS",  "path": "/ws/v1/{userid}"},
+                {"method": "GET", "path": "/v1/{userid}/in_server"}
             ]
         }))
     });
 
     let routes = root
         .or(get_route)
+        .or(in_server_route)
         .or(ws_route)
         .with(warp::cors().allow_any_origin());
 

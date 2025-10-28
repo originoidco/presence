@@ -3,6 +3,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serenity::all::{ActivityType, Client, Context, EventHandler, GatewayIntents, Presence};
 use serenity::async_trait;
+use serenity::http::Http as SerenityHttp;
+use serenity::model::id::{GuildId, UserId};
 use tokio::sync::broadcast::Sender;
 use tracing::{error, info};
 
@@ -78,6 +80,28 @@ pub async fn start_discord(cache: PresenceCache, tx: Sender<String>) {
         }
         Err(err) => {
             error!(?err, "Error creating Discord client");
+        }
+    }
+}
+
+pub async fn is_member(guild_id: u64, user_id: u64) -> Result<bool, String> {
+    let token = std::env::var("DISCORD_BOT_TOKEN")
+        .map_err(|e| format!("DISCORD_BOT_TOKEN not set: {}", e))?;
+
+    let http = SerenityHttp::new(token.as_str());
+
+    match http
+        .get_member(GuildId::new(guild_id), UserId::new(user_id))
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            if let serenity::Error::Http(http_err) = &err {
+                if http_err.status_code().map(|s| s.as_u16()) == Some(404) {
+                    return Ok(false);
+                }
+            }
+            Err(format!("Discord API error: {:?}", err))
         }
     }
 }
