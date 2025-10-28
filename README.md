@@ -10,7 +10,7 @@ Presence is Originoid's service for getting the current Spotify status of users 
 
 - REST snapshot: `GET /v1/{DISCORD_USER_ID}`
 - WebSocket stream: `WS /ws/v1/{DISCORD_USER_ID}`
-- Check if user is in server: `WS /v1/{DISCORD_USER_ID}/in_server`
+- Check if user is in server: `GET /v1/{DISCORD_USER_ID}/in_server`
 
 ## Usage
 
