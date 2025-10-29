@@ -1,6 +1,6 @@
 # Presence
 
-Presence is Originoid's service for getting the current Spotify status of users in our [Discord Server](https://discord.gg/noid). It connects a Discord Bot (with Presence Intent) to the Gateway and exposes it via REST and WebSocket.
+Presence is Originoid's service for getting the current Spotify/Listening status of users in our [Discord Server](https://discord.gg/noid). It connects a Discord Bot (with Presence Intent) to the Gateway and exposes it via REST and WebSocket.
 
 > [!NOTE]
 > Presence is only available for users who share a server with the bot and have Spotify connected and visible in Discord.
@@ -10,7 +10,7 @@ Presence is Originoid's service for getting the current Spotify status of users 
 
 - REST snapshot: `GET /v1/{DISCORD_USER_ID}`
 - WebSocket stream: `WS /ws/v1/{DISCORD_USER_ID}`
-- Check if user is in server: `GET /v1/{DISCORD_USER_ID}/in_server`
+- Check if user is in our server: `GET /v1/{DISCORD_USER_ID}/in_server`
 
 ## Usage
 
