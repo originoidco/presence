@@ -3,24 +3,17 @@
 Presence is Originoid's service for getting the current Spotify/Listening status of users in our [Discord Server](https://discord.gg/noid). It connects a Discord Bot (with Presence Intent) to the Gateway and exposes it via REST and WebSocket.
 
 > [!NOTE]
-> Presence is only available for users who share a server with the bot and have Spotify connected and visible in Discord.
-> You can try this for yourself by joining our [Discord](https://discord.gg/noid) and heading to `https://presence.originoid.co/v1/{your_discord_id}`
+> Presence is only available for users in our server.
+> You can try this for yourself by joining our [Discord](https://discord.gg/noid).
 
 ## Endpoints
 
-- REST snapshot: `GET /v1/{DISCORD_USER_ID}`
-- WebSocket stream: `WS /ws/v1/{DISCORD_USER_ID}`
-- Check if user is in our server: `GET /v1/{DISCORD_USER_ID}/in_server`
+- WebSocket stream: `WS /ws/v1/{DISCORD_USER_ID}` (personally use `websocat` to test in dev)
+- REST snapshot: `GET /v1/{DISCORD_USER_ID}` (only works with pre-existing websocket subscriber, this is intentional by design)
+- Check if user in server: `GET /v1/{DISCORD_USER_ID}/in_server`
+- Health: `GET /health`
 
 ## Usage
-
-```bash
-# REST
-curl -s https://presence.originoid.co/v1/492731761680187403
-
-# WebSocket (You can install wscat globally via your favourite node package manager!)
-wscat -c wss://presence.originoid.co/ws/v1/492731761680187403
-```
 
 ### Response
 
@@ -28,43 +21,41 @@ wscat -c wss://presence.originoid.co/ws/v1/492731761680187403
 {
   "user_id": "492731761680187403",
   "spotify": {
-    "track": "Hanging Around",
-    "artist": "Basement",
-    "album": "Promise Everything (Deluxe)",
-    "album_art_url": "https://i.scdn.co/image/ab67616d0000b273042a795b1fb9bf6efc9d5b21",
-    "started_at_ms": 1758879636097,
-    "ends_at_ms": 1758879815070
+    "track": "A Shoulder to Cry On",
+    "artist": "Dance Gavin Dance",
+    "album": "Pantheon",
+    "album_art_url": "https://i.scdn.co/image/ab67616d0000b273bb86aa29f862c224e21b96d8",
+    "started_at_ms": 1766447419972,
+    "ends_at_ms": 1766447701646
   },
-  "timestamp_ms": 1758879633871
+  "timestamp_ms": 1766447420190
 }
 ```
 
-### Struct
+## Development
 
-```rs
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpotifyActivity {
-    pub track: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub album_art_url: Option<String>,
-    pub started_at_ms: Option<i64>,
-    pub ends_at_ms: Option<i64>,
-}
+```bash
+# copy env, fill in credentials
+cp .env.example .env
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PresenceData {
-    pub user_id: String,
-    pub spotify: Option<SpotifyActivity>,
-    pub timestamp_ms: i64,
-}
+# (DOCKER IS NEEDED) start redis + run the app
+./dev.sh
+```
+
+### Caching
+
+Presence uses Redis for caching with automatic fallback to in-memory if Redis is unavailable. On startup, the app waits up to 10 seconds for Redis before falling back.
+
+Check `/health` to see current Redis status:
+```json
+{"status": "ok", "redis": true}
 ```
 
 ## Why this approach?
 
-This avoids dealing with Spotify in general while still providing real-time listening data, within Discord’s limitations.
+This avoids dealing with Spotify OAuth in general while still providing real-time listening data, within Discord’s limitations.
 
-This idea for the implementation is also heavily inspired by [Lanyard](https://github.com/Phineas/lanyard) but "dumbed-down" for our use-case, which I (dromzeh) personally use on my [own site](https://dromzeh.dev/) to display what I'm currently doing on Discord alongside what I'm listening to.
+This idea for the implementation is also heavily inspired by [Lanyard](https://github.com/Phineas/lanyard) which I (dromzeh) personally use on my [own site](https://dromzeh.dev/) to display what I'm currently doing on Discord alongside what I'm listening to, but 'dumbed-down' for Originoid's use-case.
 
 ## License
 

@@ -35,7 +35,7 @@ const PRESENCE_TTL_MS: i64 = PRESENCE_TTL_MINUTES * 60 * 1000;
 const MAX_CONNECTIONS_PER_IP: usize = 10;
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub type PresenceCache = Arc<DashMap<String, PresenceData>>;
+pub type PresenceCache = Arc<redis::Cache>;
 pub type UserWatchers = Arc<DashMap<String, watch::Sender<Option<PresenceData>>>>;
 type ConnectionCounter = Arc<DashMap<IpAddr, usize>>;
 
@@ -65,15 +65,14 @@ async fn get_presence_handler(user_id: String, state: AppState) -> Result<impl R
         ));
     }
 
-    if let Some(presence) = state.cache.get(&user_id) {
+    if let Some(presence) = state.cache.get(&user_id).await {
         if !is_presence_stale(&presence) {
             return Ok(warp::reply::with_status(
-                warp::reply::json(&*presence),
+                warp::reply::json(&presence),
                 StatusCode::OK,
             ));
         }
-        drop(presence);
-        state.cache.remove(&user_id);
+        state.cache.remove(&user_id).await;
     }
     Ok(warp::reply::with_status(
         warp::reply::json(&serde_json::json!({"error": "User not found"})),
@@ -149,7 +148,7 @@ fn try_acquire_connection(connections: &ConnectionCounter, ip: IpAddr) -> Option
 
 struct WatcherGuard {
     watchers: UserWatchers,
-    cache: PresenceCache,
+    memory_cache: Arc<DashMap<String, PresenceData>>,
     user_id: String,
 }
 
@@ -160,7 +159,7 @@ impl Drop for WatcherGuard {
         {
             drop(watcher);
             self.watchers.remove(&self.user_id);
-            self.cache.remove(&self.user_id);
+            self.memory_cache.remove(&self.user_id);
         }
     }
 }
@@ -181,15 +180,15 @@ async fn ws_handler(ws: WebSocket, user_id: String, state: AppState, _conn_guard
 
     let _watcher_guard = WatcherGuard {
         watchers: state.watchers.clone(),
-        cache: state.cache.clone(),
+        memory_cache: state.cache.get_memory(),
         user_id: user_id.clone(),
     };
 
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    if let Some(presence) = state.cache.get(&user_id)
+    if let Some(presence) = state.cache.get(&user_id).await
         && !is_presence_stale(&presence)
-        && let Ok(payload) = serde_json::to_string(&*presence)
+        && let Ok(payload) = serde_json::to_string(&presence)
     {
         let _ = ws_send_with_timeout(&mut ws_tx, Message::text(payload)).await;
     }
@@ -244,6 +243,7 @@ async fn ws_loop(
 }
 
 mod discord;
+mod redis;
 
 #[tokio::main]
 async fn main() {
@@ -252,6 +252,11 @@ async fn main() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
+    let redis_available = redis::wait_for_redis(Duration::from_secs(10)).await;
+    if !redis_available {
+        warn!("redis not available after 10s, using in-memory cache");
+    }
+
     let token = std::env::var("DISCORD_BOT_TOKEN").expect("DISCORD_BOT_TOKEN not set");
     let guild_id: u64 = std::env::var("GUILD_ID")
         .expect("GUILD_ID not set")
@@ -259,7 +264,7 @@ async fn main() {
         .expect("GUILD_ID must be a valid u64");
 
     let http = Arc::new(SerenityHttp::new(&token));
-    let cache: PresenceCache = Arc::new(DashMap::new());
+    let cache = Arc::new(redis::Cache::new());
     let watchers: UserWatchers = Arc::new(DashMap::new());
     let connections: ConnectionCounter = Arc::new(DashMap::new());
 
@@ -304,12 +309,21 @@ async fn main() {
             "endpoints": [
                 {"method": "GET", "path": "/v1/{userid}"},
                 {"method": "WS",  "path": "/ws/v1/{userid}"},
-                {"method": "GET", "path": "/v1/{userid}/in_server"}
+                {"method": "GET", "path": "/v1/{userid}/in_server"},
+                {"method": "GET", "path": "/health"}
             ]
         }))
     });
 
+    let health_route = warp::path!("health").and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({
+            "status": "ok",
+            "redis": redis::is_redis_available()
+        }))
+    });
+
     let routes = root
+        .or(health_route)
         .or(get_route)
         .or(in_server_route)
         .or(ws_route)

@@ -73,7 +73,7 @@ impl EventHandler for Handler {
         };
 
         if watcher.send(Some(presence.clone())).is_ok() {
-            self.cache.insert(user_id, presence);
+            self.cache.set(&user_id, &presence).await;
         }
     }
 }
