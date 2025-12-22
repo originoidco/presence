@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use serenity::all::{ActivityType, Client, Context, EventHandler, GatewayIntents, Presence, Ready, ResumedEvent};
+use serenity::all::{
+    ActivityType, Client, Context, EventHandler, GatewayIntents, Presence, Ready, ResumedEvent,
+};
 use serenity::async_trait;
 use serenity::http::Http as SerenityHttp;
 use serenity::model::id::{GuildId, UserId};
@@ -88,7 +90,10 @@ pub async fn start_discord(cache: PresenceCache, watchers: UserWatchers) -> ! {
             watchers: watchers.clone(),
         };
 
-        match Client::builder(&token, intents).event_handler(handler).await {
+        match Client::builder(&token, intents)
+            .event_handler(handler)
+            .await
+        {
             Ok(mut client) => {
                 attempt = 0;
                 info!("discord client starting");
@@ -108,7 +113,11 @@ pub async fn start_discord(cache: PresenceCache, watchers: UserWatchers) -> ! {
     }
 }
 
-pub async fn is_member(http: &SerenityHttp, guild_id: GuildId, user_id: u64) -> Result<bool, String> {
+pub async fn is_member(
+    http: &SerenityHttp,
+    guild_id: GuildId,
+    user_id: u64,
+) -> Result<bool, String> {
     match http.get_member(guild_id, UserId::new(user_id)).await {
         Ok(_) => Ok(true),
         Err(err) => {

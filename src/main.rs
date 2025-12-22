@@ -81,10 +81,7 @@ async fn get_presence_handler(user_id: String, state: AppState) -> Result<impl R
     ))
 }
 
-async fn user_in_server_handler(
-    user_id: String,
-    state: AppState,
-) -> Result<impl Reply, Rejection> {
+async fn user_in_server_handler(user_id: String, state: AppState) -> Result<impl Reply, Rejection> {
     let uid = match user_id.parse::<u64>() {
         Ok(v) => v,
         Err(_) => {
