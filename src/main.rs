@@ -1,11 +1,15 @@
 use std::convert::Infallible;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
-use tracing::info;
+use serenity::http::Http as SerenityHttp;
+use serenity::model::id::GuildId;
+use tokio::sync::watch;
+use tokio::time::{Duration, Instant, interval_at, timeout};
+use tracing::{info, warn};
 use warp::ws::{Message, WebSocket, Ws};
 use warp::{Filter, Rejection, Reply, http::StatusCode};
 
@@ -26,34 +30,57 @@ pub struct PresenceData {
     pub timestamp_ms: i64,
 }
 
-type PresenceCache = Arc<DashMap<String, PresenceData>>;
+const PRESENCE_TTL_MINUTES: i64 = 5;
+const PRESENCE_TTL_MS: i64 = PRESENCE_TTL_MINUTES * 60 * 1000;
+const MAX_CONNECTIONS_PER_IP: usize = 10;
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
-type PresenceBroadcast = broadcast::Sender<String>;
+pub type PresenceCache = Arc<redis::Cache>;
+pub type UserWatchers = Arc<DashMap<String, watch::Sender<Option<PresenceData>>>>;
+type ConnectionCounter = Arc<DashMap<IpAddr, usize>>;
 
 #[derive(Clone)]
 struct AppState {
     cache: PresenceCache,
-    tx: PresenceBroadcast,
+    watchers: UserWatchers,
+    connections: ConnectionCounter,
+    http: Arc<SerenityHttp>,
+    guild_id: GuildId,
+}
+
+fn is_presence_stale(presence: &PresenceData) -> bool {
+    let now = chrono::Utc::now().timestamp_millis();
+    now - presence.timestamp_ms > PRESENCE_TTL_MS
+}
+
+fn validate_user_id(user_id: &str) -> bool {
+    user_id.len() <= 20 && user_id.chars().all(|c| c.is_ascii_digit())
 }
 
 async fn get_presence_handler(user_id: String, state: AppState) -> Result<impl Reply, Rejection> {
-    if let Some(presence) = state.cache.get(&user_id) {
-        Ok(warp::reply::with_status(
-            warp::reply::json(&*presence),
-            StatusCode::OK,
-        ))
-    } else {
-        Ok(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({"error": "User not found"})),
-            StatusCode::NOT_FOUND,
-        ))
+    if !validate_user_id(&user_id) {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"error": "invalid user id"})),
+            StatusCode::BAD_REQUEST,
+        ));
     }
+
+    if let Some(presence) = state.cache.get(&user_id).await {
+        if !is_presence_stale(&presence) {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&presence),
+                StatusCode::OK,
+            ));
+        }
+        state.cache.remove(&user_id).await;
+    }
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({"error": "User not found"})),
+        StatusCode::NOT_FOUND,
+    ))
 }
 
-async fn user_in_server_handler(
-    user_id: String,
-    _state: AppState,
-) -> Result<impl Reply, Rejection> {
+async fn user_in_server_handler(user_id: String, state: AppState) -> Result<impl Reply, Rejection> {
     let uid = match user_id.parse::<u64>() {
         Ok(v) => v,
         Err(_) => {
@@ -64,25 +91,7 @@ async fn user_in_server_handler(
         }
     };
 
-    let guild_id = match std::env::var("GUILD_ID") {
-        Ok(s) => match s.parse::<u64>() {
-            Ok(v) => v,
-            Err(_) => {
-                return Ok(warp::reply::with_status(
-                    warp::reply::json(&serde_json::json!({ "error": "invalid GUILD_ID in env" })),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                ));
-            }
-        },
-        Err(_) => {
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({ "error": "GUILD_ID not set in env" })),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ));
-        }
-    };
-
-    match discord::is_member(guild_id, uid).await {
+    match discord::is_member(&state.http, state.guild_id, uid).await {
         Ok(in_server) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({ "in_server": in_server })),
             StatusCode::OK,
@@ -98,48 +107,143 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn ws_handler(ws: WebSocket, user_id: String, state: AppState) {
-    let mut rx = state.tx.subscribe();
+fn extract_client_ip() -> impl Filter<Extract = (IpAddr,), Error = Rejection> + Clone {
+    warp::header::optional::<String>("cf-connecting-ip").map(|cf_ip: Option<String>| {
+        cf_ip
+            .and_then(|ip| ip.parse().ok())
+            .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]))
+    })
+}
+
+struct ConnectionGuard {
+    connections: ConnectionCounter,
+    ip: IpAddr,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) = self.connections.entry(self.ip)
+        {
+            *entry.get_mut() -= 1;
+            if *entry.get() == 0 {
+                entry.remove();
+            }
+        }
+    }
+}
+
+fn try_acquire_connection(connections: &ConnectionCounter, ip: IpAddr) -> Option<ConnectionGuard> {
+    let mut entry = connections.entry(ip).or_insert(0);
+    if *entry >= MAX_CONNECTIONS_PER_IP {
+        return None;
+    }
+    *entry += 1;
+    drop(entry);
+
+    Some(ConnectionGuard {
+        connections: connections.clone(),
+        ip,
+    })
+}
+
+struct WatcherGuard {
+    watchers: UserWatchers,
+    memory_cache: Arc<DashMap<String, PresenceData>>,
+    user_id: String,
+}
+
+impl Drop for WatcherGuard {
+    fn drop(&mut self) {
+        if let Some(watcher) = self.watchers.get(&self.user_id)
+            && watcher.receiver_count() == 0
+        {
+            drop(watcher);
+            self.watchers.remove(&self.user_id);
+            self.memory_cache.remove(&self.user_id);
+        }
+    }
+}
+
+async fn ws_send_with_timeout(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    msg: Message,
+) -> bool {
+    matches!(timeout(WS_SEND_TIMEOUT, ws_tx.send(msg)).await, Ok(Ok(_)))
+}
+
+async fn ws_handler(ws: WebSocket, user_id: String, state: AppState, _conn_guard: ConnectionGuard) {
+    let rx = state
+        .watchers
+        .entry(user_id.clone())
+        .or_insert_with(|| watch::channel(None).0)
+        .subscribe();
+
+    let _watcher_guard = WatcherGuard {
+        watchers: state.watchers.clone(),
+        memory_cache: state.cache.get_memory(),
+        user_id: user_id.clone(),
+    };
 
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    if let Some(presence) = state.cache.get(&user_id) {
-        let _ = ws_tx
-            .send(Message::text(
-                serde_json::to_string(&*presence).unwrap_or_else(|_| "{}".into()),
-            ))
-            .await;
+    if let Some(presence) = state.cache.get(&user_id).await
+        && !is_presence_stale(&presence)
+        && let Ok(payload) = serde_json::to_string(&presence)
+    {
+        let _ = ws_send_with_timeout(&mut ws_tx, Message::text(payload)).await;
     }
 
-    let user_id_for_task = user_id.clone();
-    let cache = Arc::clone(&state.cache);
+    ws_loop(&mut ws_tx, &mut ws_rx, rx).await;
+}
 
-    let recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_rx.next().await {
-            if msg.is_close() {
-                break;
+async fn ws_loop(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+    mut rx: watch::Receiver<Option<PresenceData>>,
+) {
+    let mut ping_interval = interval_at(
+        Instant::now() + Duration::from_secs(25),
+        Duration::from_secs(25),
+    );
+
+    loop {
+        tokio::select! {
+            _ = ping_interval.tick() => {
+                if !ws_send_with_timeout(ws_tx, Message::ping(Vec::new())).await {
+                    break;
+                }
             }
-        }
-    });
 
-    let send_task = tokio::spawn(async move {
-        while let Ok(changed_user_id) = rx.recv().await {
-            #[allow(clippy::collapsible_if)]
-            if changed_user_id == user_id_for_task {
-                if let Some(presence) = cache.get(&changed_user_id) {
-                    let payload = serde_json::to_string(&*presence).unwrap_or_else(|_| "{}".into());
-                    if ws_tx.send(Message::text(payload)).await.is_err() {
-                        break;
+            incoming = ws_rx.next() => {
+                match incoming {
+                    Some(Ok(msg)) if msg.is_close() => break,
+                    Some(Ok(msg)) if msg.is_ping() => {
+                        let _ = ws_send_with_timeout(ws_tx, Message::pong(msg.into_bytes())).await;
                     }
+                    Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+
+            result = rx.changed() => {
+                if result.is_err() {
+                    break;
+                }
+                let presence = rx.borrow_and_update().clone();
+                if let Some(ref p) = presence
+                    && !is_presence_stale(p)
+                    && let Ok(payload) = serde_json::to_string(p)
+                    && !ws_send_with_timeout(ws_tx, Message::text(payload)).await
+                {
+                    break;
                 }
             }
         }
-    });
-
-    let _ = tokio::try_join!(recv_task, send_task);
+    }
 }
 
 mod discord;
+mod redis;
 
 #[tokio::main]
 async fn main() {
@@ -148,51 +252,87 @@ async fn main() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    let cache: PresenceCache = Arc::new(DashMap::new());
-    let (tx, _rx) = broadcast::channel::<String>(1024);
-    let state = AppState { cache, tx };
+    let redis_available = redis::wait_for_redis(Duration::from_secs(10)).await;
+    if !redis_available {
+        warn!("redis not available after 10s, using in-memory cache");
+    }
 
-    // GET: /v1/{userid}
+    let token = std::env::var("DISCORD_BOT_TOKEN").expect("DISCORD_BOT_TOKEN not set");
+    let guild_id: u64 = std::env::var("GUILD_ID")
+        .expect("GUILD_ID not set")
+        .parse()
+        .expect("GUILD_ID must be a valid u64");
+
+    let http = Arc::new(SerenityHttp::new(&token));
+    let cache = Arc::new(redis::Cache::new());
+    let watchers: UserWatchers = Arc::new(DashMap::new());
+    let connections: ConnectionCounter = Arc::new(DashMap::new());
+
+    let state = AppState {
+        cache,
+        watchers,
+        connections,
+        http,
+        guild_id: GuildId::new(guild_id),
+    };
+
     let get_route = warp::path!("v1" / String)
         .and(warp::get())
         .and(with_state(state.clone()))
         .and_then(get_presence_handler);
 
-    // GET: /v1/{userid}/in_server
     let in_server_route = warp::path!("v1" / String / "in_server")
         .and(warp::get())
         .and(with_state(state.clone()))
         .and_then(user_in_server_handler);
 
-    // WS: /ws/v1/{userid}
     let ws_route = warp::path!("ws" / "v1" / String)
         .and(warp::ws())
         .and(with_state(state.clone()))
-        .map(|user_id: String, ws: Ws, state: AppState| {
-            ws.on_upgrade(move |socket| ws_handler(socket, user_id, state))
+        .and(extract_client_ip())
+        .map(|user_id: String, ws: Ws, state: AppState, ip: IpAddr| {
+            ws.on_upgrade(move |socket| async move {
+                if !validate_user_id(&user_id) {
+                    return;
+                }
+                match try_acquire_connection(&state.connections, ip) {
+                    Some(guard) => ws_handler(socket, user_id, state, guard).await,
+                    None => {
+                        warn!(ip = %ip, "connection limit exceeded");
+                    }
+                }
+            })
         });
 
-    // GET: /
     let root = warp::path::end().and(warp::get()).map(|| {
         warp::reply::json(&serde_json::json!({
             "endpoints": [
                 {"method": "GET", "path": "/v1/{userid}"},
                 {"method": "WS",  "path": "/ws/v1/{userid}"},
-                {"method": "GET", "path": "/v1/{userid}/in_server"}
+                {"method": "GET", "path": "/v1/{userid}/in_server"},
+                {"method": "GET", "path": "/health"}
             ]
         }))
     });
 
+    let health_route = warp::path!("health").and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({
+            "status": "ok",
+            "redis": redis::is_redis_available()
+        }))
+    });
+
     let routes = root
+        .or(health_route)
         .or(get_route)
         .or(in_server_route)
         .or(ws_route)
         .with(warp::cors().allow_any_origin());
 
-    info!("Starting HTTP server on 0.0.0.0:8787");
+    info!("starting http server on 0.0.0.0:8787");
     tokio::spawn(discord::start_discord(
         state.cache.clone(),
-        state.tx.clone(),
+        state.watchers.clone(),
     ));
     warp::serve(routes).run(([0, 0, 0, 0], 8787)).await;
 }
