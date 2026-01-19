@@ -1,6 +1,6 @@
 # Presence
 
-Presence is Originoid's service for getting the current Spotify/Listening status of users in our [Discord Server](https://discord.gg/noid). It connects a Discord Bot (with Presence Intent) to the Gateway and exposes it via REST and WebSocket.
+Presence is a service for getting the current Spotify/Listening status of users in our [Discord Server](https://discord.gg/noid). It connects a Discord Bot (with Presence Intent) to the Gateway and exposes it via REST and WebSocket.
 
 > [!NOTE]
 > Presence is only available for users in our server.
@@ -55,12 +55,12 @@ Check `/health` to see current Redis status:
 
 This avoids dealing with Spotify OAuth in general while still providing real-time listening data, within Discord’s limitations.
 
-This idea for the implementation is also heavily inspired by [Lanyard](https://github.com/Phineas/lanyard) which I (dromzeh) personally use on my [own site](https://dromzeh.dev/) to display what I'm currently doing on Discord alongside what I'm listening to, but 'dumbed-down' for Originoid's use-case.
+This idea for the implementation is heavily inspired by [Lanyard](https://github.com/Phineas/lanyard) which I (dromzeh) personally use on my [own site](https://dromzeh.dev/) to display what I'm currently listening to.
 
 ## License
 
-[originoidco/presence](https://github.com/originoidco/presence) is licensed under the [GNU Affero General Public License v3.0](LICENSE). Authored by [@dromzeh](https://x.com/@dromzeh/).
+[antifield/presence](https://github.com/antifield/presence) is licensed under the [GNU Affero General Public License v3.0](LICENSE). Authored by [@dromzeh](https://dromzeh.dev/).
 
 You must state all significant changes made to the original software, make the source code available to the public with credit to the original author, original source, and use the same license.
 
-> © 2025 Originoid LTD | Registered UK Company No. 15988228 | ICO Reference No. ZB857511
+> © 2025 Antifield LTD | Registered UK Company No. 15988228 | ICO Reference No. ZB857511
